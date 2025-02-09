@@ -37,9 +37,23 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+func getSocketPath(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "darwin" {
+		return "/tmp"
+	}
+	return t.TempDir()
+}
+
 func fakeServer(t *testing.T, path, provider string) (*fake.MockCSIProviderServer, func()) {
 	t.Helper()
 	serverEndpoint := fmt.Sprintf("%s/%s.sock", path, provider)
+
+	// Ensure the directory exists
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatalf("failed to create socket directory: %v", err)
+	}
+
 	server, err := fake.NewMocKCSIProviderServer(serverEndpoint)
 	if err != nil {
 		t.Fatalf("expected err to be nil, got: %+v", err)
@@ -174,7 +188,7 @@ func TestMountContent(t *testing.T) {
 			if test.skipon == runtime.GOOS {
 				t.SkipNow()
 			}
-			socketPath := t.TempDir()
+			socketPath := getSocketPath(t)
 			targetPath := t.TempDir()
 
 			pool := NewPluginClientBuilder([]string{socketPath})
@@ -225,7 +239,7 @@ func TestMountContent(t *testing.T) {
 }
 
 func TestMountContent_TooLarge(t *testing.T) {
-	socketPath := t.TempDir()
+	socketPath := getSocketPath(t)
 	targetPath := t.TempDir()
 
 	// set a very small max message size
@@ -325,7 +339,7 @@ func TestMountContentError(t *testing.T) {
 
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			socketPath := t.TempDir()
+			socketPath := getSocketPath(t)
 
 			pool := NewPluginClientBuilder([]string{socketPath})
 			defer pool.Cleanup()
@@ -362,7 +376,7 @@ func TestMountContentError(t *testing.T) {
 }
 
 func TestPluginClientBuilder(t *testing.T) {
-	path := t.TempDir()
+	path := getSocketPath(t)
 
 	cb := NewPluginClientBuilder([]string{path})
 	ctx := context.Background()
@@ -392,8 +406,8 @@ func TestPluginClientBuilder(t *testing.T) {
 }
 
 func TestPluginClientBuilderMultiPath(t *testing.T) {
-	emptyPath := t.TempDir()
-	path := t.TempDir()
+	emptyPath := getSocketPath(t)
+	path := getSocketPath(t)
 
 	// Ensure that if the path containing the listening socket is not the first
 	// path checked that the operation still succeeds.
@@ -425,7 +439,7 @@ func TestPluginClientBuilderMultiPath(t *testing.T) {
 }
 
 func TestPluginClientBuilder_ConcurrentGet(t *testing.T) {
-	path := t.TempDir()
+	path := getSocketPath(t)
 
 	cb := NewPluginClientBuilder([]string{path})
 	ctx := context.Background()
@@ -453,7 +467,7 @@ func TestPluginClientBuilder_ConcurrentGet(t *testing.T) {
 }
 
 func TestPluginClientBuilderErrorNotFound(t *testing.T) {
-	path := t.TempDir()
+	path := getSocketPath(t)
 
 	cb := NewPluginClientBuilder([]string{path})
 	ctx := context.Background()
@@ -475,7 +489,7 @@ func TestPluginClientBuilderErrorNotFound(t *testing.T) {
 }
 
 func TestPluginClientBuilderErrorInvalid(t *testing.T) {
-	path := t.TempDir()
+	path := getSocketPath(t)
 
 	cb := NewPluginClientBuilder([]string{path})
 	ctx := context.Background()
@@ -498,7 +512,7 @@ func TestVersion(t *testing.T) {
 
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			socketPath := t.TempDir()
+			socketPath := getSocketPath(t)
 
 			pool := NewPluginClientBuilder([]string{socketPath})
 			defer pool.Cleanup()
@@ -529,7 +543,7 @@ func TestVersion(t *testing.T) {
 func TestPluginClientBuilder_HealthCheck(t *testing.T) {
 	// this test asserts the read lock and unlock semantics in the
 	// HealthCheck() method work as expected
-	path := t.TempDir()
+	path := getSocketPath(t)
 
 	cb := NewPluginClientBuilder([]string{path})
 	ctx := context.Background()

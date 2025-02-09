@@ -42,7 +42,8 @@ func NewSecretsStoreDriver(driverName, nodeID, endpoint string,
 	providerClients *PluginClientBuilder,
 	client client.Client,
 	reader client.Reader,
-	tokenClient *k8s.TokenClient) *SecretsStore {
+	tokenClient *k8s.TokenClient,
+	tokenAuthMode string) *SecretsStore {
 	klog.InfoS("Initializing Secrets Store CSI Driver", "driver", driverName, "version", version.BuildVersion, "buildTime", version.BuildTime)
 
 	sr, err := NewStatsReporter()
@@ -50,7 +51,7 @@ func NewSecretsStoreDriver(driverName, nodeID, endpoint string,
 		klog.ErrorS(err, "failed to initialize stats reporter")
 		os.Exit(1)
 	}
-	ns, err := newNodeServer(nodeID, mount.New(""), providerClients, client, reader, sr, tokenClient)
+	ns, err := newNodeServer(nodeID, mount.New(""), providerClients, client, reader, sr, tokenClient, tokenAuthMode)
 	if err != nil {
 		klog.ErrorS(err, "failed to initialize node server")
 		os.Exit(1)
@@ -70,7 +71,8 @@ func newNodeServer(nodeID string,
 	client client.Client,
 	reader client.Reader,
 	statsReporter StatsReporter,
-	tokenClient *k8s.TokenClient) (*nodeServer, error) {
+	tokenClient *k8s.TokenClient,
+	tokenAuthMode string) (*nodeServer, error) {
 	return &nodeServer{
 		mounter:         mounter,
 		reporter:        statsReporter,
@@ -79,6 +81,7 @@ func newNodeServer(nodeID string,
 		reader:          reader,
 		providerClients: providerClients,
 		tokenClient:     tokenClient,
+		tokenAuthMode:   tokenAuthMode,
 	}, nil
 }
 

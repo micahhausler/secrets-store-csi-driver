@@ -40,11 +40,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func testNodeServer(t *testing.T, client client.Client, reporter StatsReporter) (*nodeServer, error) {
+func testNodeServer(t *testing.T, client client.Client, reporter StatsReporter, tokenAuthMode string) (*nodeServer, error) {
 	t.Helper()
 
 	// Create a mock provider named "provider1".
-	socketPath := t.TempDir()
+	socketPath := getSocketPath(t)
 	server, err := providerfake.NewMocKCSIProviderServer(filepath.Join(socketPath, "provider1.sock"))
 	if err != nil {
 		t.Fatalf("unexpected mock provider failure: %v", err)
@@ -53,10 +53,27 @@ func testNodeServer(t *testing.T, client client.Client, reporter StatsReporter) 
 	if err := server.Start(); err != nil {
 		t.Fatalf("unexpected mock provider start failure: %v", err)
 	}
-	t.Cleanup(server.Stop)
+	t.Cleanup(func() {
+		server.Stop()
+		os.Remove(filepath.Join(socketPath, "provider1.sock"))
+	})
 
 	providerClients := NewPluginClientBuilder([]string{socketPath})
-	return newNodeServer("testnode", mount.NewFakeMounter([]mount.MountPoint{}), providerClients, client, client, reporter, k8s.NewTokenClient(fakeclient.NewSimpleClientset(), "test-driver", 1*time.Second))
+
+	tokenClient := k8s.NewTokenClient(fakeclient.NewSimpleClientset(), "test-driver", 1*time.Second)
+	if tokenAuthMode == "csi" {
+		tokenClient = nil
+	}
+	return newNodeServer(
+		"test-node",
+		mount.NewFakeMounter([]mount.MountPoint{}),
+		providerClients,
+		client,
+		client,
+		reporter,
+		tokenClient,
+		tokenAuthMode,
+	)
 }
 
 func TestNodePublishVolume_Errors(t *testing.T) {
@@ -203,19 +220,9 @@ func TestNodePublishVolume_Errors(t *testing.T) {
 				},
 				Readonly: true,
 			},
-			initObjects: []client.Object{
-				&secretsstorev1.SecretProviderClass{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "provider1",
-						Namespace: "default",
-					},
-					Spec: secretsstorev1.SecretProviderClassSpec{
-						Provider:   "provider_not_installed",
-						Parameters: map[string]string{"parameter1": "value1"},
-					},
-				},
-			},
-			want: codes.Unknown,
+			// no provider class installed
+			initObjects: []client.Object{},
+			want:        codes.Unknown,
 		},
 	}
 
@@ -230,7 +237,7 @@ func TestNodePublishVolume_Errors(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			r := mocks.NewFakeReporter()
 
-			ns, err := testNodeServer(t, fake.NewClientBuilder().WithScheme(s).WithObjects(test.initObjects...).Build(), r)
+			ns, err := testNodeServer(t, fake.NewClientBuilder().WithScheme(s).WithObjects(test.initObjects...).Build(), r, "client")
 			if err != nil {
 				t.Fatalf("expected error to be nil, got: %+v", err)
 			}
@@ -269,10 +276,12 @@ func TestNodePublishVolume(t *testing.T) {
 	tests := []struct {
 		name              string
 		nodePublishVolReq *csi.NodePublishVolumeRequest
+		tokenAuthMode     string
 		initObjects       []client.Object
 	}{
 		{
-			name: "volume mount",
+			name:          "volume mount",
+			tokenAuthMode: "client",
 			nodePublishVolReq: &csi.NodePublishVolumeRequest{
 				VolumeCapability: &csi.VolumeCapability{},
 				VolumeId:         "testvolid1",
@@ -299,7 +308,39 @@ func TestNodePublishVolume(t *testing.T) {
 			},
 		},
 		{
-			name: "volume mount with refresh token",
+			name:          "volume mount with refresh token",
+			tokenAuthMode: "client",
+			nodePublishVolReq: &csi.NodePublishVolumeRequest{
+				VolumeCapability: &csi.VolumeCapability{},
+				VolumeId:         "testvolid1",
+				TargetPath:       targetPath(t),
+				VolumeContext: map[string]string{
+					"secretProviderClass": "provider1",
+					CSIPodName:            "pod1",
+					CSIPodNamespace:       "default",
+					CSIPodUID:             "poduid1",
+					// not a real token, just for testing
+					CSIPodServiceAccountTokens: `{"https://kubernetes.default.svc":{"token":"eyJhbGciOiJSUzI1NiIsImtpZCI6IjEyMyJ9.eyJhdWQiOlsiaHR0cHM6Ly9rdWJlcm5ldGVzLmRlZmF1bHQuc3ZjIl0sImV4cCI6MTYxMTk1OTM5NiwiaWF0IjoxNjExOTU4Nzk2LCJpc3MiOiJodHRwczovL2t1YmVybmV0ZXMuZGVmYXVsdC5zdmMiLCJrdWJlcm5ldGVzLmlvIjp7Im5hbWVzcGFjZSI6ImRlZmF1bHQiLCJzZXJ2aWNlYWNjb3VudCI6eyJuYW1lIjoiZGVmYXVsdCIsInVpZCI6IjA5MWUyNTU3LWJkODYtNDhhMC1iZmNmLWI1YTI4ZjRjODAyNCJ9fSwibmJmIjoxNjExOTU4Nzk2LCJzdWIiOiJzeXN0ZW06c2VydmljZWFjY291bnQ6ZGVmYXVsdDpkZWZhdWx0In0.YNU2Z_gEE84DGCt8lh9GuE8gmoof-Pk_7emp3fsyj9pq16DRiDaLtOdprH-njpOYqvtT5Uf_QspFc_RwD_pdq9UJWCeLxFkRTsYR5WSjhMFcl767c4Cwp_oZPYhaHd1x7aU1emH-9oarrM__tr1hSmGoAc2I0gUSkAYFueaTUSy5e5d9QKDfjVljDRc7Yrp6qAAfd1OuDdk1XYIjrqTHk1T1oqGGlcd3lRM_dKSsW5I_YqgKMrjwNt8yOKcdKBrgQhgC42GZbFDRVJDJHs_Hq32xo-2s3PJ8UZ_alN4wv8EbuwB987_FHBTc_XAULHPvp0mCv2C5h0V2A7gzccv30A","expirationTimestamp":"2021-01-29T22:29:56Z"}}`,
+					"providerName":             "provider1",
+				},
+				Readonly: true,
+			},
+			initObjects: []client.Object{
+				&secretsstorev1.SecretProviderClass{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "provider1",
+						Namespace: "default",
+					},
+					Spec: secretsstorev1.SecretProviderClassSpec{
+						Provider:   "provider1",
+						Parameters: map[string]string{"parameter1": "value1"},
+					},
+				},
+			},
+		},
+		{
+			name:          "volume mount with CSI refresh token",
+			tokenAuthMode: "csi",
 			nodePublishVolReq: &csi.NodePublishVolumeRequest{
 				VolumeCapability: &csi.VolumeCapability{},
 				VolumeId:         "testvolid1",
@@ -341,7 +382,7 @@ func TestNodePublishVolume(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			r := mocks.NewFakeReporter()
 
-			ns, err := testNodeServer(t, fake.NewClientBuilder().WithScheme(s).WithObjects(test.initObjects...).Build(), r)
+			ns, err := testNodeServer(t, fake.NewClientBuilder().WithScheme(s).WithObjects(test.initObjects...).Build(), r, test.tokenAuthMode)
 			if err != nil {
 				t.Fatalf("expected error to be nil, got: %+v", err)
 			}
@@ -384,7 +425,7 @@ func TestNodeUnpublishVolume(t *testing.T) {
 	)
 
 	r := mocks.NewFakeReporter()
-	ns, err := testNodeServer(t, fake.NewClientBuilder().WithScheme(s).Build(), r)
+	ns, err := testNodeServer(t, fake.NewClientBuilder().WithScheme(s).Build(), r, "client")
 	if err != nil {
 		t.Fatalf("expected error to be nil, got: %+v", err)
 	}
@@ -463,7 +504,7 @@ func TestNodeUnpublishVolume_Error(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			r := mocks.NewFakeReporter()
-			ns, err := testNodeServer(t, fake.NewClientBuilder().WithScheme(s).Build(), r)
+			ns, err := testNodeServer(t, fake.NewClientBuilder().WithScheme(s).Build(), r, "client")
 			if err != nil {
 				t.Fatalf("expected error to be nil, got: %+v", err)
 			}

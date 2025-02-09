@@ -48,6 +48,10 @@ type nodeServer struct {
 	reader          client.Reader
 	providerClients *PluginClientBuilder
 	tokenClient     *k8s.TokenClient
+	// tokenAuthMode indicates how service account tokens are obtained
+	// "csi" - tokens provided by kubelet via CSI
+	// "client" - tokens obtained by TokenClient (default)
+	tokenAuthMode string
 }
 
 const (
@@ -135,10 +139,6 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 			return nil, status.Errorf(codes.Internal, "failed to check if target path %s is mount point, err: %v", targetPath, err)
 		}
 	}
-	if mounted {
-		klog.InfoS("target path is already mounted", "targetPath", targetPath, "pod", klog.ObjectRef{Namespace: podNamespace, Name: podName})
-		return &csi.NodePublishVolumeResponse{}, nil
-	}
 
 	klog.V(2).InfoS("node publish volume", "target", targetPath, "volumeId", volumeID, "mount flags", mountFlags)
 
@@ -184,11 +184,10 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	// csi.storage.k8s.io/serviceAccount.tokens is empty for Kubernetes version < 1.20.
 	// For 1.20+, if tokenRequests is set in the CSI driver spec, kubelet will generate
 	// a token for the pod and send it to the CSI driver.
-	// This check is done for backward compatibility to support passing token from driver
-	// to provider irrespective of the Kubernetes version. If the token doesn't exist in the
-	// volume request context, the CSI driver will generate the token for the configured audience
-	// and send it to the provider in the parameters.
-	if parameters[CSIPodServiceAccountTokens] == "" {
+	// If the token doesn't exist in the volume request context and secret rotation is enabled,
+	// the CSI driver will generate the token for the configured audience and send it to the provider.
+	// If secret rotation is disabled, only kubelet-provided tokens will be used.
+	if parameters[CSIPodServiceAccountTokens] == "" && ns.tokenClient != nil {
 		// Inject pod service account token into volume attributes
 		serviceAccountTokenAttrs, err := ns.tokenClient.PodServiceAccountTokenAttrs(podNamespace, podName, serviceAccountName, types.UID(podUID))
 		if err != nil {
@@ -198,6 +197,8 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		for k, v := range serviceAccountTokenAttrs {
 			parameters[k] = v
 		}
+	} else if parameters[CSIPodServiceAccountTokens] == "" {
+		klog.V(4).InfoS("no token provided by kubelet and token generation is disabled (secret rotation is disabled)", "pod", klog.ObjectRef{Namespace: podNamespace, Name: podName})
 	}
 
 	// ensure it's read-only
@@ -221,8 +222,6 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		return nil, err
 	}
 
-	// TODO: until requiresRemount (#585) is supported, "mounted" will always be false
-	// and this code will always be called
 	if !mounted {
 		// mount before providers can write content to it
 		// In linux Mount tmpfs mounts tmpfs to targetPath
@@ -235,7 +234,6 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 			return nil, err
 		}
 	}
-	mounted = true
 	var objectVersions map[string]string
 	if objectVersions, errorReason, err = ns.mountSecretsStoreObjectContent(ctx, providerName, string(parametersStr), string(secretStr), targetPath, string(permissionStr), podName); err != nil {
 		klog.ErrorS(err, "failed to mount secrets store object content", "pod", klog.ObjectRef{Namespace: podNamespace, Name: podName})
@@ -297,7 +295,7 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	}
 
 	podUID := fileutil.GetPodUIDFromTargetPath(targetPath)
-	if podUID != "" {
+	if podUID != "" && ns.tokenClient != nil {
 		// delete service account token from cache as the pod is deleted
 		// to ensure the cache isn't growing indefinitely
 		ns.tokenClient.DeleteServiceAccountToken(types.UID(podUID))
@@ -319,6 +317,8 @@ func (ns *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 		return nil, status.Error(codes.InvalidArgument, "Volume capability missing in request")
 	}
 
+	// For secrets-store-csi-driver, we don't need to do anything for staging
+	// as we handle everything in NodePublishVolume
 	return &csi.NodeStageVolumeResponse{}, nil
 }
 

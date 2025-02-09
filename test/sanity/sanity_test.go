@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -36,12 +37,27 @@ const (
 )
 
 func TestSanity(t *testing.T) {
-	driver := secretsstore.NewSecretsStoreDriver("secrets-store.csi.k8s.io", "somenodeid", endpoint, nil, nil, nil, nil)
+	driver := secretsstore.NewSecretsStoreDriver(
+		"secrets-store.csi.k8s.io",
+		"node-123",
+		endpoint,
+		nil,      // providerClients
+		nil,      // client
+		nil,      // reader
+		nil,      // tokenClient
+		"client", // default to client mode for tests
+	)
 	go func() {
 		driver.Run(context.Background())
 	}()
 
-	tmpPath := filepath.Join(os.TempDir(), "csi")
+	var tmpPath string
+	if runtime.GOOS == "darwin" {
+		tmpPath = "/tmp/csi"
+	} else {
+		tmpPath = filepath.Join(os.TempDir(), "csi")
+	}
+
 	config := sanity.NewTestConfig()
 	config.Address = endpoint
 	config.CreateTargetDir = func(targetPath string) (string, error) {

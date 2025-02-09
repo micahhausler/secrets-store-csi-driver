@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 
 	"sigs.k8s.io/secrets-store-csi-driver/provider/v1alpha1"
 
@@ -83,6 +84,10 @@ func (m *MockCSIProviderServer) SetProviderErrorCode(errorCode string) {
 
 func (m *MockCSIProviderServer) Start() error {
 	var err error
+	// Ensure the directory for the socket exists
+	if err = os.MkdirAll(filepath.Dir(m.socketPath), 0755); err != nil {
+		return fmt.Errorf("failed to create socket directory: %v", err)
+	}
 	m.listener, err = net.Listen("unix", m.socketPath)
 	if err != nil {
 		return err

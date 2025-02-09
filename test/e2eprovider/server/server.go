@@ -169,6 +169,19 @@ func (s *Server) Mount(ctx context.Context, req *v1alpha1.MountRequest) (*v1alph
 		resp.ObjectVersion = append(resp.ObjectVersion, version)
 	}
 
+	// if tokens are set, we'll throw them in the volume
+	if tok, ok := attrib[serviceAccountTokensAttribute]; ok {
+		resp.Files = append(resp.Files, &v1alpha1.File{
+			Path:     "tokens.json",
+			Contents: []byte(tok),
+		})
+		resp.ObjectVersion = append(resp.ObjectVersion, &v1alpha1.ObjectVersion{
+			Id:      "tokens.json",
+			Version: "v1",
+		})
+	}
+
+	// if validate token flag is set, we want to check the service account tokens as passed
 	// if validate token flag is set, we want to check the service account tokens as passed
 	// as part of the mount attributes.
 	// In case of 1.21+, kubelet will generate the token and pass it as part of the volume context.

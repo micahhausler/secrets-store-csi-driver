@@ -61,6 +61,7 @@ var (
 	additionalProviderPaths = flag.String("additional-provider-volume-paths", "/etc/kubernetes/secrets-store-csi-providers", "Comma separated list of additional paths to communicate with providers")
 	metricsAddr             = flag.String("metrics-addr", ":8095", "The address the metric endpoint binds to")
 	enableSecretRotation    = flag.Bool("enable-secret-rotation", false, "Enable secret rotation feature [alpha]")
+	tokenAuthMode           = flag.String("token-auth-mode", "client", "Mode for obtaining service account tokens. Valid values: 'csi' (tokens provided by kubelet via CSI), 'client' (tokens obtained by TokenClient, default)")
 	rotationPollInterval    = flag.Duration("rotation-poll-interval", 2*time.Minute, "Secret rotation poll interval duration")
 	enableProfile           = flag.Bool("enable-pprof", false, "enable pprof profiling")
 	profilePort             = flag.Int("pprof-port", 6065, "port for pprof profiling")
@@ -204,25 +205,28 @@ func mainErr() error {
 	}()
 
 	// token request client
-	kubeClient := kubernetes.NewForConfigOrDie(cfg)
-	tokenClient := k8s.NewTokenClient(kubeClient, *driverName, 10*time.Minute)
+	var tokenClient *k8s.TokenClient
+	if *enableSecretRotation && *tokenAuthMode == "client" {
+		kubeClient := kubernetes.NewForConfigOrDie(cfg)
+		tokenClient = k8s.NewTokenClient(kubeClient, *driverName, 10*time.Minute)
+		if err = tokenClient.Run(ctx.Done()); err != nil {
+			klog.ErrorS(err, "failed to run token client")
+			return err
+		}
 
-	if err = tokenClient.Run(ctx.Done()); err != nil {
-		klog.ErrorS(err, "failed to run token client")
-		return err
-	}
-
-	// Secret rotation
-	if *enableSecretRotation {
 		rec, err := rotation.NewReconciler(*driverName, mgr.GetCache(), scheme, *rotationPollInterval, providerClients, tokenClient)
 		if err != nil {
 			klog.ErrorS(err, "failed to initialize rotation reconciler")
 			return err
 		}
 		go rec.Run(ctx.Done())
+	} else if *enableSecretRotation && *tokenAuthMode != "csi" {
+		return fmt.Errorf("invalid token-auth-mode %q - valid values are 'csi' or 'client'", *tokenAuthMode)
+	} else {
+		klog.InfoS("TokenClient is disabled", "tokenAuthMode", *tokenAuthMode, "secretRotation", *enableSecretRotation)
 	}
 
-	driver := secretsstore.NewSecretsStoreDriver(*driverName, *nodeID, *endpoint, providerClients, mgr.GetClient(), mgr.GetAPIReader(), tokenClient)
+	driver := secretsstore.NewSecretsStoreDriver(*driverName, *nodeID, *endpoint, providerClients, mgr.GetClient(), mgr.GetAPIReader(), tokenClient, *tokenAuthMode)
 	driver.Run(ctx)
 
 	return nil
