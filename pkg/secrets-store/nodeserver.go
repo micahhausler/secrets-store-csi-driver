@@ -63,6 +63,8 @@ const (
 	// CSIPodServiceAccountTokens is the service account tokens of the pod that the mount is created for
 	CSIPodServiceAccountTokens = "csi.storage.k8s.io/serviceAccount.tokens" //nolint
 
+	SecretStoreVolumeID = "secrets-store-csi-driver.sigs.k8s.io/volume.id"
+
 	secretProviderClassField = "secretProviderClass"
 )
 
@@ -181,6 +183,8 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	for k, v := range attrib {
 		parameters[k] = v
 	}
+	// Add the volume ID to the parameters
+	parameters[SecretStoreVolumeID] = volumeID
 
 	// ensure it's read-only
 	if !req.GetReadonly() {
